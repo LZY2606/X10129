@@ -1,0 +1,14 @@
+
+ÿ
+
+test.protogo.starlark.net.testdata"ÿ
+Test!
+string_field (	RstringField
+int32_field (R
+int32Field%
+repeated_field (	RrepeatedFieldI
+	map_field (2,.go.starlark.net.testdata.Test.MapFieldEntryRmapField;
+MapFieldEntry
+key (	Rkey
+value (	Rvalue:8*de:H
+ext_string_field.go.starlark.net.testdata.Testd (	RextStringFieldbeditionspè
