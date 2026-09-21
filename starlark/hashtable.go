@@ -17,13 +17,12 @@ import (
 //
 // Initialized instances of hashtable must not be copied.
 type hashtable struct {
-	table     []bucket  // len is zero or a power of two
-	bucket0   [1]bucket // inline allocation for small maps.
-	len       uint32
-	itercount uint32  // number of active iterators (ignored if frozen)
-	head      *entry  // insertion order doubly-linked list; may be nil
-	tailLink  **entry // address of nil link at end of list (perhaps &head)
-	frozen    bool
+	iter     iterState // active-iteration leases and frozen bit
+	table    []bucket  // len is zero or a power of two
+	bucket0  [1]bucket // inline allocation for small maps.
+	len      uint32
+	head     *entry  // insertion order doubly-linked list; may be nil
+	tailLink **entry // address of nil link at end of list (perhaps &head)
 
 	_ noCopy // triggers vet copylock check on this type.
 }
@@ -66,8 +65,8 @@ func (ht *hashtable) init(size int) {
 }
 
 func (ht *hashtable) freeze() {
-	if !ht.frozen {
-		ht.frozen = true
+	if !ht.iter.isFrozen() {
+		ht.iter.freeze()
 		for e := ht.head; e != nil; e = e.next {
 			e.key.Freeze()
 			e.value.Freeze()
@@ -328,15 +327,9 @@ func (ht *hashtable) delete(k Value) (v Value, found bool, err error) {
 }
 
 // checkMutable reports an error if the hash table should not be mutated.
-// verb+" dict" should describe the operation.
+// verb+" hash table" should describe the operation.
 func (ht *hashtable) checkMutable(verb string) error {
-	if ht.frozen {
-		return fmt.Errorf("cannot %s frozen hash table", verb)
-	}
-	if ht.itercount > 0 {
-		return fmt.Errorf("cannot %s hash table during iteration", verb)
-	}
-	return nil
+	return ht.iter.checkMutable("hash table", verb)
 }
 
 func (ht *hashtable) clear() error {
@@ -391,15 +384,12 @@ func (ht *hashtable) dump() {
 }
 
 func (ht *hashtable) iterate() *keyIterator {
-	if !ht.frozen {
-		ht.itercount++
-	}
-	return &keyIterator{ht: ht, e: ht.head}
+	return &keyIterator{iterLease: ht.iter.begin(), e: ht.head}
 }
 
 type keyIterator struct {
-	ht *hashtable
-	e  *entry
+	iterLease
+	e *entry
 }
 
 func (it *keyIterator) Next(k *Value) bool {
@@ -411,19 +401,23 @@ func (it *keyIterator) Next(k *Value) bool {
 	return false
 }
 
-func (it *keyIterator) Done() {
-	if !it.ht.frozen {
-		it.ht.itercount--
-	}
-}
+func (it *keyIterator) Done() { it.release() }
 
 // entries is a go1.23 iterator over the entries of the hash table.
 func (ht *hashtable) entries(yield func(k, v Value) bool) {
-	if !ht.frozen {
-		ht.itercount++
-		defer func() { ht.itercount-- }()
-	}
+	lease := ht.iter.begin()
+	defer lease.release()
 	for e := ht.head; e != nil && yield(e.key, e.value); e = e.next {
+	}
+}
+
+// keySeq is a go1.23 iterator over the keys of the hash table.
+// It avoids the nested yield-adapting closure that an entries-based
+// implementation would need, keeping Set.Elements allocation-free.
+func (ht *hashtable) keySeq(yield func(k Value) bool) {
+	lease := ht.iter.begin()
+	defer lease.release()
+	for e := ht.head; e != nil && yield(e.key); e = e.next {
 	}
 }
 

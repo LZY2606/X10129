@@ -952,9 +952,9 @@ func dictsEqual(x, y *Dict, depth int) (bool, error) {
 
 // A *List represents a Starlark list value.
 type List struct {
-	elems     []Value
-	frozen    bool
-	itercount uint32 // number of active iterators (ignored if frozen)
+	elems []Value
+	iter  iterState // active leases and frozen bit; occupies the same
+	// offsets as the former frozen and itercount fields
 }
 
 // NewList returns a list containing the specified elements.
@@ -962,8 +962,8 @@ type List struct {
 func NewList(elems []Value) *List { return &List{elems: elems} }
 
 func (l *List) Freeze() {
-	if !l.frozen {
-		l.frozen = true
+	if !l.iter.isFrozen() {
+		l.iter.freeze()
 		for _, elem := range l.elems {
 			elem.Freeze()
 		}
@@ -973,13 +973,7 @@ func (l *List) Freeze() {
 // checkMutable reports an error if the list should not be mutated.
 // verb+" list" should describe the operation.
 func (l *List) checkMutable(verb string) error {
-	if l.frozen {
-		return fmt.Errorf("cannot %s frozen list", verb)
-	}
-	if l.itercount > 0 {
-		return fmt.Errorf("cannot %s list during iteration", verb)
-	}
-	return nil
+	return l.iter.checkMutable("list", verb)
 }
 
 func (l *List) String() string        { return toString(l) }
@@ -1007,10 +1001,7 @@ func (l *List) Attr(name string) (Value, error) { return builtinAttr(l, name, li
 func (l *List) AttrNames() []string             { return builtinAttrNames(listMethods) }
 
 func (l *List) Iterate() Iterator {
-	if !l.frozen {
-		l.itercount++
-	}
-	return &listIterator{l: l}
+	return &listIterator{iterLease: l.iter.begin(), l: l}
 }
 
 // Elements returns an iterator over the sequence of elements of the list.
@@ -1020,10 +1011,8 @@ func (l *List) Iterate() Iterator {
 //	for elem := range list.Elements() { ... }
 func (l *List) Elements() iter.Seq[Value] {
 	return func(yield func(Value) bool) {
-		if !l.frozen {
-			l.itercount++
-			defer func() { l.itercount-- }()
-		}
+		lease := l.iter.begin()
+		defer lease.release()
 		for _, x := range l.elems {
 			if !yield(x) {
 				break
@@ -1076,6 +1065,7 @@ func sliceCompare(op syntax.Token, x, y []Value, depth int) (bool, error) {
 }
 
 type listIterator struct {
+	iterLease
 	l *List
 	i int
 }
@@ -1089,11 +1079,7 @@ func (it *listIterator) Next(p *Value) bool {
 	return false
 }
 
-func (it *listIterator) Done() {
-	if !it.l.frozen {
-		it.l.itercount--
-	}
-}
+func (it *listIterator) Done() { it.release() }
 
 func (l *List) SetIndex(i int, v Value) error {
 	if err := l.checkMutable("assign to element of"); err != nil {
@@ -1239,8 +1225,8 @@ func (s *Set) Hash() (uint32, error)                  { return 0, fmt.Errorf("un
 func (s *Set) Truth() Bool                            { return s.Len() > 0 }
 
 func (s *Set) Elements() iter.Seq[Value] {
-	return func(yield func(k Value) bool) {
-		s.ht.entries(func(k, _ Value) bool { return yield(k) })
+	return func(yield func(Value) bool) {
+		s.ht.keySeq(yield)
 	}
 }
 
